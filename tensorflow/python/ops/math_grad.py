@@ -47,6 +47,10 @@ def _ArgMinGrad(op, grad):
   return [None, None]
 
 
+# TODO(rmlarsen): Implement gradient.
+ops.NotDifferentiable("EuclideanNorm")
+
+
 @ops.RegisterGradient("Sum")
 def _SumGrad(op, grad):
   """Gradient for Sum."""
@@ -99,7 +103,7 @@ def _MinOrMaxGrad(op, grad):
   num_selected = array_ops.reshape(
       math_ops.reduce_sum(indicators, op.inputs[1]), output_shape_kept_dims)
 
-  return [math_ops.div(indicators, num_selected) * grad, None]
+  return [math_ops.divide(indicators, num_selected) * grad, None]
 
 
 @ops.RegisterGradient("Max")
@@ -171,7 +175,9 @@ def _ProdGrad(op, grad):
   # Calculate product, leaving out the current entry
   left = math_ops.cumprod(reshaped, axis=0, exclusive=True)
   right = math_ops.cumprod(reshaped, axis=0, exclusive=True, reverse=True)
-  y = array_ops.reshape(left * right, permuted_shape)
+  # For complex inputs, the gradient is in the conjugate direction.
+  y = array_ops.reshape(math_ops.conj(left) * math_ops.conj(right),
+                        permuted_shape)
 
   # Invert the transpose and reshape operations.
   # Make sure to set the statically known shape information through a reshape.
@@ -194,7 +200,7 @@ def _SegmentMeanGrad(op, grad):
       array_ops.fill(array_ops.expand_dims(input_rank - 1, 0), 1)
   ], 0)
   ones = array_ops.fill(ones_shape, constant_op.constant(1, dtype=grad.dtype))
-  scaled_grad = math_ops.div(grad, math_ops.segment_sum(ones, op.inputs[1]))
+  scaled_grad = math_ops.divide(grad, math_ops.segment_sum(ones, op.inputs[1]))
   return array_ops.gather(scaled_grad, op.inputs[1]), None
 
 
@@ -258,7 +264,7 @@ def _SegmentMinOrMaxGrad(op, grad):
                                       op.inputs[1])
   # Compute the gradient for each segment. The gradient for the ith segment is
   # divided evenly among the selected elements in that segment.
-  weighted_grads = math_ops.div(grad, num_selected)
+  weighted_grads = math_ops.divide(grad, num_selected)
   gathered_grads = array_ops.gather(weighted_grads, op.inputs[1])
   return array_ops.where(is_selected, gathered_grads, zeros), None
 
@@ -312,7 +318,7 @@ def _UnsortedSegmentMinOrMaxGrad(op, grad):
       math_ops.cast(is_selected, grad.dtype), op.inputs[1], op.inputs[2])
   # Compute the gradient for each segment. The gradient for the ith segment is
   # divided evenly among the selected elements in that segment.
-  weighted_grads = math_ops.div(grad, num_selected)
+  weighted_grads = math_ops.divide(grad, num_selected)
   gathered_grads, _, _ = _GatherDropNegatives(weighted_grads, None,
                                               zero_clipped_indices,
                                               is_positive)
@@ -514,6 +520,40 @@ def _Log1pGrad(op, grad):
     return grad * math_ops.reciprocal(1 + x)
 
 
+@ops.RegisterGradient("Xlogy")
+def _XLogyGrad(op, grad):
+  """Returns gradient of xlogy(x, y) with respect to x and y."""
+  x = op.inputs[0]
+  y = op.inputs[1]
+  sx = array_ops.shape(x)
+  sy = array_ops.shape(y)
+  rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
+  with ops.control_dependencies([grad]):
+    not_zero_x = math_ops.cast(
+        math_ops.not_equal(x, math_ops.cast(0., dtype=x.dtype)), dtype=x.dtype)
+    partial_x = gen_math_ops.xlogy(not_zero_x, y)
+    partial_y = gen_math_ops.xdivy(x, y)
+    return (array_ops.reshape(math_ops.reduce_sum(partial_x * grad, rx), sx),
+            array_ops.reshape(math_ops.reduce_sum(partial_y * grad, ry), sy))
+
+
+@ops.RegisterGradient("Xdivy")
+def _XDivyGrad(op, grad):
+  """Returns gradient of xdivy(x, y) with respect to x and y."""
+  x = op.inputs[0]
+  y = op.inputs[1]
+  sx = array_ops.shape(x)
+  sy = array_ops.shape(y)
+  rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
+  with ops.control_dependencies([grad]):
+    not_zero_x = math_ops.cast(
+        math_ops.not_equal(x, math_ops.cast(0., dtype=x.dtype)), dtype=x.dtype)
+    partial_x = gen_math_ops.xdivy(not_zero_x, y)
+    partial_y = gen_math_ops.xdivy(math_ops.negative(x), y**2)
+    return (array_ops.reshape(math_ops.reduce_sum(partial_x * grad, rx), sx),
+            array_ops.reshape(math_ops.reduce_sum(partial_y * grad, ry), sy))
+
+
 @ops.RegisterGradient("Sinh")
 def _SinhGrad(op, grad):
   """Returns grad * cosh(x)."""
@@ -618,29 +658,59 @@ def _DigammaGrad(op, grad):
     return grad * math_ops.polygamma(array_ops.constant(1, dtype=x.dtype), x)
 
 
+@ops.RegisterGradient("BesselI0e")
+def _BesselI0eGrad(op, grad):
+  """Compute gradient of bessel_i0e(x) with respect to its argument."""
+  x = op.inputs[0]
+  y = op.outputs[0]
+  with ops.control_dependencies([grad]):
+    return grad * (math_ops.bessel_i1e(x) - math_ops.sign(x) * y)
+
+
+@ops.RegisterGradient("BesselI1e")
+def _BesselI1eGrad(op, grad):
+  """Compute gradient of bessel_i1e(x) with respect to its argument."""
+  x = op.inputs[0]
+  y = op.outputs[0]
+  with ops.control_dependencies([grad]):
+    # For x = 0, the correct gradient is 0.5.
+    # However, the main branch gives NaN because of the division by x, so
+    # we impute the gradient manually.
+    # An alternative solution is to express the gradient via bessel_i0e and
+    # bessel_i2e, but the latter is not yet implemented in Eigen.
+    eps = np.finfo(x.dtype.as_numpy_dtype).eps
+    zeros = array_ops.zeros_like(x)
+    x_is_not_tiny = math_ops.abs(x) > eps
+    safe_x = array_ops.where(x_is_not_tiny, x, eps + zeros)
+    dy_dx = math_ops.bessel_i0e(safe_x) - y * (
+        math_ops.sign(safe_x) + math_ops.reciprocal(safe_x))
+    return grad * array_ops.where(x_is_not_tiny, dy_dx, 0.5 + zeros)
+
+
 @ops.RegisterGradient("Igamma")
 def _IgammaGrad(op, grad):
-  """Returns gradient of igamma(a, x) with respect to x."""
-  # TODO(ebrevdo): Perhaps add the derivative w.r.t. a
+  """Returns gradient of igamma(a, x) with respect to a and x."""
   a = op.inputs[0]
   x = op.inputs[1]
   sa = array_ops.shape(a)
   sx = array_ops.shape(x)
-  unused_ra, rx = gen_array_ops.broadcast_gradient_args(sa, sx)
+  ra, rx = gen_array_ops.broadcast_gradient_args(sa, sx)
 
-  # Perform operations in log space before summing, because Gamma(a)
-  # and Gamma'(a) can grow large.
-  partial_x = math_ops.exp(-x + (a - 1) * math_ops.log(x) - math_ops.lgamma(a))
-  # TODO(b/36815900): Mark None return values as NotImplemented
-  return (None, array_ops.reshape(
-      math_ops.reduce_sum(partial_x * grad, rx), sx))
+  with ops.control_dependencies([grad]):
+    partial_a = gen_math_ops.igamma_grad_a(a, x)
+    # Perform operations in log space before summing, because Gamma(a)
+    # and Gamma'(a) can grow large.
+    partial_x = math_ops.exp(-x + (a - 1) * math_ops.log(x)
+                             - math_ops.lgamma(a))
+    return (array_ops.reshape(math_ops.reduce_sum(partial_a * grad, ra), sa),
+            array_ops.reshape(math_ops.reduce_sum(partial_x * grad, rx), sx))
 
 
 @ops.RegisterGradient("Igammac")
 def _IgammacGrad(op, grad):
-  """Returns gradient of igammac(a, x) = 1 - igamma(a, x) w.r.t. x."""
-  _, igamma_grad_x = _IgammaGrad(op, grad)
-  return None, -igamma_grad_x
+  """Returns gradient of igammac(a, x) = 1 - igamma(a, x) w.r.t. a and x."""
+  igamma_grad_a, igamma_grad_x = _IgammaGrad(op, grad)
+  return (-igamma_grad_a, -igamma_grad_x)
 
 
 @ops.RegisterGradient("Betainc")
@@ -880,6 +950,26 @@ def _MulGrad(op, grad):
               math_ops.reduce_sum(gen_math_ops.mul(x, grad), ry), sy))
 
 
+@ops.RegisterGradient("MulNoNan")
+def _MulNoNanGrad(op, grad):
+  """The gradient of scalar multiplication with NaN-suppression."""
+  x = op.inputs[0]
+  y = op.inputs[1]
+  if (isinstance(grad, ops.Tensor) and
+      _ShapesFullySpecifiedAndEqual(x, y, grad)):
+    return gen_math_ops.mul_no_nan(grad, y), gen_math_ops.mul_no_nan(
+        x, grad)
+  assert x.dtype.base_dtype == y.dtype.base_dtype, (x.dtype, " vs. ", y.dtype)
+  sx = array_ops.shape(x)
+  sy = array_ops.shape(y)
+  rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
+  return (array_ops.reshape(
+      math_ops.reduce_sum(gen_math_ops.mul_no_nan(grad, y), rx), sx),
+          array_ops.reshape(
+              math_ops.reduce_sum(gen_math_ops.mul_no_nan(x, grad), ry),
+              sy))
+
+
 @ops.RegisterGradient("Div")
 def _DivGrad(op, grad):
   """The gradient for the Div operator."""
@@ -890,10 +980,11 @@ def _DivGrad(op, grad):
   rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
   x = math_ops.conj(x)
   y = math_ops.conj(y)
-  return (array_ops.reshape(math_ops.reduce_sum(math_ops.div(grad, y), rx), sx),
+  return (array_ops.reshape(
+      math_ops.reduce_sum(math_ops.divide(grad, y), rx), sx),
           array_ops.reshape(
-              math_ops.reduce_sum(grad * math_ops.div(math_ops.div(-x, y), y),
-                                  ry), sy))
+              math_ops.reduce_sum(
+                  grad * math_ops.divide(math_ops.divide(-x, y), y), ry), sy))
 
 
 @ops.RegisterGradient("FloorDiv")
@@ -940,6 +1031,24 @@ def _RealDivGrad(op, grad):
                   grad * math_ops.realdiv(math_ops.realdiv(-x, y), y), ry), sy))
 
 
+@ops.RegisterGradient("DivNoNan")
+def _DivNoNanGrad(op, grad):
+  """DivNoNan op gradient."""
+  x = op.inputs[0]
+  y = op.inputs[1]
+  sx = array_ops.shape(x)
+  sy = array_ops.shape(y)
+  rx, ry = gen_array_ops.broadcast_gradient_args(sx, sy)
+  x = math_ops.conj(x)
+  y = math_ops.conj(y)
+  return (array_ops.reshape(
+      math_ops.reduce_sum(math_ops.div_no_nan(grad, y), rx), sx),
+          array_ops.reshape(
+              math_ops.reduce_sum(
+                  grad * math_ops.div_no_nan(math_ops.div_no_nan(-x, y), y),
+                  ry), sy))
+
+
 @ops.RegisterGradient("Pow")
 def _PowGrad(op, grad):
   """Returns grad * (y*x^(y-1), z*log(x))."""
@@ -957,11 +1066,12 @@ def _PowGrad(op, grad):
   # Avoid false singularity at x = 0
   if x.dtype.is_complex:
     # real(x) < 0 is fine for the complex case
-    log_x = array_ops.where(
-        math_ops.not_equal(x, 0), math_ops.log(x), array_ops.zeros_like(x))
+    mask = math_ops.not_equal(x, 0)
   else:
     # There's no sensible real value to return if x < 0, so return 0
-    log_x = array_ops.where(x > 0, math_ops.log(x), array_ops.zeros_like(x))
+    mask = x > 0
+  safe_x = array_ops.where(mask, x, array_ops.ones_like(x))
+  log_x = array_ops.where(mask, math_ops.log(safe_x), array_ops.zeros_like(x))
   gy = array_ops.reshape(math_ops.reduce_sum(grad * z * log_x, ry), sy)
   return gx, gy
 
@@ -1258,3 +1368,20 @@ def _CumprodGrad(op, grad):
   out = math_ops.cumsum(
       prod * grad, axis, exclusive=exclusive, reverse=not reverse)
   return [out / x, None]
+
+
+@ops.RegisterGradient("NextAfter")
+def _NextAfterGrad(op, grad):
+  """Returns gradient of nextafter(x1, x2) with respect to x1 and x2."""
+  x1 = op.inputs[0]
+  x2 = op.inputs[1]
+  s_x1 = array_ops.shape(x1)
+  s_x2 = array_ops.shape(x2)
+  r_x1, r_x2 = gen_array_ops.broadcast_gradient_args(s_x1, s_x2)
+  with ops.control_dependencies([grad]):
+    partial_x1 = array_ops.ones(s_x1, dtype=x1.dtype)
+    partial_x2 = array_ops.zeros(s_x2, dtype=x2.dtype)
+    return (array_ops.reshape(
+        math_ops.reduce_sum(partial_x1 * grad, r_x1), s_x1),
+            array_ops.reshape(
+                math_ops.reduce_sum(partial_x2 * grad, r_x2), s_x2))

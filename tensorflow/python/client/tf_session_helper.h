@@ -40,6 +40,9 @@ typedef tensorflow::gtl::InlinedVector<PyObject*, 8> PyObjectVector;
 // A TF_TensorVector is a vector of borrowed pointers to TF_Tensors.
 typedef gtl::InlinedVector<TF_Tensor*, 8> TF_TensorVector;
 
+TF_Session* TF_NewSessionRef(TF_Graph* graph, const TF_SessionOptions* opts,
+                             TF_Status* status);
+
 // Run the graph associated with the session starting with the
 // supplied inputs[].  Regardless of success or failure, inputs[] are
 // stolen by the implementation (i.e. the implementation will
@@ -205,7 +208,9 @@ TF_Function* TF_GraphToFunction_wrapper(
     const TF_Graph* fn_body, const char* fn_name, bool append_hash_to_fn_name,
     const std::vector<TF_Operation*>* opers,
     const std::vector<TF_Output>& inputs, const std::vector<TF_Output>& outputs,
-    const NameVector& output_names, const TF_FunctionOptions* opts,
+    const NameVector& output_names,
+    const std::vector<TF_Operation*>* control_outputs,
+    const NameVector& control_output_names, const TF_FunctionOptions* opts,
     const char* description, TF_Status* status);
 
 // Set the shapes and types for the output's handle.

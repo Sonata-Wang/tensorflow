@@ -134,11 +134,12 @@ class SoftmaxOpGPU : public OpKernel {
 
   void Compute(OpKernelContext* context) override {
     const Tensor& logits_in_ = context->input(0);
-    auto logits_in = logits_in_.matrix<T>();
+    OP_REQUIRES(context, TensorShapeUtils::IsVectorOrHigher(logits_in_.shape()),
+                errors::InvalidArgument("logits must have >= 1 dimension, got ",
+                                        logits_in_.shape().DebugString()));
+    auto logits_in = logits_in_.flat_inner_dims<T>();
     const int rows = logits_in.dimension(0);
     const int cols = logits_in.dimension(1);
-    OP_REQUIRES(context, TensorShapeUtils::IsMatrix(logits_in_.shape()),
-                errors::InvalidArgument("logits must be 2-dimensional"));
     Tensor* softmax_out = nullptr;
     OP_REQUIRES_OK(context, context->forward_input_or_allocate_output(
                                 {0}, 0, logits_in_.shape(), &softmax_out));
@@ -179,13 +180,12 @@ class SoftmaxOpGPU : public OpKernel {
           context, const_cast<acc_type*>(sum_probs.flat<acc_type>().data()),
           input_itr, rows, cols);
 
-      GenerateNormalizedProb<T, acc_type>
-          <<<numBlocks, numThreads, 0, cu_stream>>>(
-              reinterpret_cast<const T*>(logits_in_.flat<T>().data()),
-              reinterpret_cast<const acc_type*>(
-                  sum_probs.flat<acc_type>().data()),
-              reinterpret_cast<const T*>(max_logits.flat<T>().data()),
-              const_cast<T*>(softmax_out->flat<T>().data()), rows, cols, log_);
+      TF_CHECK_OK(CudaLaunchKernel(
+          GenerateNormalizedProb<T, acc_type>, numBlocks, numThreads, 0,
+          cu_stream, reinterpret_cast<const T*>(logits_in_.flat<T>().data()),
+          reinterpret_cast<const acc_type*>(sum_probs.flat<acc_type>().data()),
+          reinterpret_cast<const T*>(max_logits.flat<T>().data()),
+          const_cast<T*>(softmax_out->flat<T>().data()), rows, cols, log_));
     }
   }
 

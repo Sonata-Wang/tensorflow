@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/hlo_matchers.h"
 
+#include "absl/strings/str_join.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/test.h"
 
@@ -195,14 +196,45 @@ void HloShardingMatcher::DescribeTo(std::ostream* os) const {
   }
 }
 
+bool HloDotWithContractingDimsMatcher::MatchAndExplain(
+    const HloInstruction* instruction,
+    ::testing::MatchResultListener* listener) const {
+  if (!HloMatcher::MatchAndExplain(instruction, listener)) {
+    return false;
+  }
+
+  const DotDimensionNumbers& dim_nums = instruction->dot_dimension_numbers();
+  if (dim_nums.lhs_contracting_dimensions_size() != 1 ||
+      dim_nums.lhs_contracting_dimensions(0) != lhs_contracting_dim_) {
+    *listener << instruction->ToString()
+              << " has wrong lhs_contracting_dimensions (got {"
+              << absl::StrJoin(dim_nums.lhs_contracting_dimensions(), ",")
+              << "} want {" << lhs_contracting_dim_ << "})";
+    return false;
+  }
+
+  if (dim_nums.rhs_contracting_dimensions_size() != 1 ||
+      dim_nums.rhs_contracting_dimensions(0) != rhs_contracting_dim_) {
+    *listener << instruction->ToString()
+              << " has wrong rhs_contracting_dimensions (got {"
+              << absl::StrJoin(dim_nums.rhs_contracting_dimensions(), ",")
+              << "} want {" << rhs_contracting_dim_ << "})";
+    return false;
+  }
+
+  return true;
+}
+
+void HloDotWithContractingDimsMatcher::DescribeTo(std::ostream* os) const {
+  HloMatcher::DescribeTo(os);
+  *os << " with lhs_contracting_dims={" << lhs_contracting_dim_
+      << "} and rhs_contracting_dims={" << rhs_contracting_dim_ << "}";
+}
+
 }  // namespace testing
 
 void PrintTo(const HloInstruction* inst, ::std::ostream* os) {
   *os << (inst ? inst->ToString() : "nullptr");
-}
-
-void PrintTo(HloInstruction* inst, ::std::ostream* os) {
-  PrintTo(const_cast<const HloInstruction*>(inst), os);
 }
 
 }  // namespace xla

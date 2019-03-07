@@ -21,6 +21,8 @@ limitations under the License.
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/utils.h"
+#include "tensorflow/core/lib/gtl/flatset.h"
+#include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -44,16 +46,22 @@ const NodeScopeAndName ParseNodeScopeAndName(const string& node_name);
 struct GraphOptimizerContext {
   GraphOptimizerContext(const std::unordered_set<string>* nodes_to_preserve,
                         GraphDef* optimized_graph,
-                        GraphProperties* graph_properties, NodeMap* node_map)
+                        GraphProperties* graph_properties, NodeMap* node_map,
+                        gtl::FlatSet<string>* feed_nodes,
+                        RewriterConfig::Toggle opt_level)
       : nodes_to_preserve(nodes_to_preserve),
         optimized_graph(optimized_graph),
         graph_properties(graph_properties),
-        node_map(node_map) {}
+        node_map(node_map),
+        feed_nodes(feed_nodes),
+        opt_level(opt_level) {}
 
   const std::unordered_set<string>* nodes_to_preserve;
   GraphDef* optimized_graph;
   GraphProperties* graph_properties;
   NodeMap* node_map;
+  gtl::FlatSet<string>* feed_nodes;
+  RewriterConfig::Toggle opt_level;
 };
 
 Status GetInputNode(const GraphOptimizerContext& ctx, const string& input,
@@ -230,14 +238,34 @@ class GraphOptimizerStagePipeline {
         // Each stage must be "error safe" (just like exception safe). In
         // case of any error it must leave optimized graph unmodified.
         if (!stage_status.ok()) {
-          LOG(WARNING) << "Failed to run optimizer " << stage->optimizer_name()
-                       << ", stage " << stage->stage_name()
-                       << ". Error: " << stage_status.error_message();
+          VLOG(2) << "Failed to run optimizer " << stage->optimizer_name()
+                  << ", stage " << stage->stage_name() << " node "
+                  << node->name()
+                  << ". Error: " << stage_status.error_message();
         }
         if (break_predicate_(*result)) return true;
       }
     }
     return false;
+  }
+
+  // Pass a node through all registered optimizer stages, until break predicate
+  // is true or a stage fails.
+  //
+  // Returns any stage failure status, or else Status::OK().
+  Status PassThroughAllStagesWithStatus(NodeDef* node, Result* result) {
+    for (auto& stage : stages_) {
+      if (!stage->IsSupported(node)) {
+        continue;
+      }
+      const Status stage_status = stage->TrySimplify(node, result);
+      if (!stage_status.ok()) {
+        return stage_status;
+      } else if (break_predicate_(*result)) {
+        break;
+      }
+    }
+    return Status::OK();
   }
 
   std::size_t NumStages() { return stages_.size(); }

@@ -23,9 +23,8 @@ import os
 import weakref
 
 from tensorflow.python.eager import context
-from tensorflow.python.estimator import util as estimator_util
 from tensorflow.python.framework import ops
-from tensorflow.python.keras._impl.keras.engine import base_layer as keras_base_layer
+from tensorflow.python.keras.engine import base_layer_utils
 from tensorflow.python.layers import base
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.platform import tf_logging as logging
@@ -33,6 +32,7 @@ from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.training import training_util
 from tensorflow.python.util import deprecation
+from tensorflow.python.util import function_utils
 
 # pylint: disable=protected-access
 # Explanation for protected-access disable: Network has lots of same-class and
@@ -220,7 +220,7 @@ class Network(base.Layer):
         avoid_names = parent_network._owned_layers
         name_uid_map = parent_network._sub_layer_name_uids
       else:
-        name_uid_map = keras_base_layer.get_default_graph_uid_map()
+        name_uid_map = base_layer_utils.get_default_graph_uid_map()
         # Figure out which names we have to avoid based on which variable scope
         # we're nested in.
         strip_name = self._default_parent_variable_scope.name
@@ -545,10 +545,10 @@ class Sequential(Network):
 
   def add(self, layer_func):
     if isinstance(layer_func, base.Layer):
-      args = estimator_util.fn_args(layer_func.call)
+      args = function_utils.fn_args(layer_func.call)
       self.track_layer(layer_func)
     elif callable(layer_func):
-      args = estimator_util.fn_args(layer_func)
+      args = function_utils.fn_args(layer_func)
     else:
       raise TypeError(
           "Sequential.add() takes only tf.layers.Layer objects or callables; "

@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_CORE_PLATFORM_RETRYING_FILE_SYSTEM_H_
-#define TENSORFLOW_CORE_PLATFORM_RETRYING_FILE_SYSTEM_H_
+#ifndef TENSORFLOW_CORE_PLATFORM_CLOUD_RETRYING_FILE_SYSTEM_H_
+#define TENSORFLOW_CORE_PLATFORM_CLOUD_RETRYING_FILE_SYSTEM_H_
 
 #include <functional>
 #include <string>
@@ -34,9 +34,9 @@ template <typename Underlying>
 class RetryingFileSystem : public FileSystem {
  public:
   RetryingFileSystem(std::unique_ptr<Underlying> base_file_system,
-                     int64 delay_microseconds = 1000000)
+                     const RetryConfig& retry_config)
       : base_file_system_(std::move(base_file_system)),
-        initial_delay_microseconds_(delay_microseconds) {}
+        retry_config_(retry_config) {}
 
   Status NewRandomAccessFile(
       const string& filename,
@@ -54,75 +54,81 @@ class RetryingFileSystem : public FileSystem {
 
   Status FileExists(const string& fname) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::FileExists, base_file_system_.get(), fname),
-        initial_delay_microseconds_);
+        [this, &fname]() { return base_file_system_->FileExists(fname); },
+        retry_config_);
   }
 
   Status GetChildren(const string& dir, std::vector<string>* result) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::GetChildren, base_file_system_.get(), dir,
-                  result),
-        initial_delay_microseconds_);
+        [this, &dir, result]() {
+          return base_file_system_->GetChildren(dir, result);
+        },
+        retry_config_);
   }
 
   Status GetMatchingPaths(const string& pattern,
                           std::vector<string>* result) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::GetMatchingPaths, base_file_system_.get(),
-                  pattern, result),
-        initial_delay_microseconds_);
+        [this, &pattern, result]() {
+          return base_file_system_->GetMatchingPaths(pattern, result);
+        },
+        retry_config_);
   }
 
   Status Stat(const string& fname, FileStatistics* stat) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::Stat, base_file_system_.get(), fname, stat),
-        initial_delay_microseconds_);
+        [this, &fname, stat]() { return base_file_system_->Stat(fname, stat); },
+        retry_config_);
   }
 
   Status DeleteFile(const string& fname) override {
     return RetryingUtils::DeleteWithRetries(
-        std::bind(&FileSystem::DeleteFile, base_file_system_.get(), fname),
-        initial_delay_microseconds_);
+        [this, &fname]() { return base_file_system_->DeleteFile(fname); },
+        retry_config_);
   }
 
   Status CreateDir(const string& dirname) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::CreateDir, base_file_system_.get(), dirname),
-        initial_delay_microseconds_);
+        [this, &dirname]() { return base_file_system_->CreateDir(dirname); },
+        retry_config_);
   }
 
   Status DeleteDir(const string& dirname) override {
     return RetryingUtils::DeleteWithRetries(
-        std::bind(&FileSystem::DeleteDir, base_file_system_.get(), dirname),
-        initial_delay_microseconds_);
+        [this, &dirname]() { return base_file_system_->DeleteDir(dirname); },
+        retry_config_);
   }
 
   Status GetFileSize(const string& fname, uint64* file_size) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::GetFileSize, base_file_system_.get(), fname,
-                  file_size),
-        initial_delay_microseconds_);
+        [this, &fname, file_size]() {
+          return base_file_system_->GetFileSize(fname, file_size);
+        },
+        retry_config_);
   }
 
   Status RenameFile(const string& src, const string& target) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::RenameFile, base_file_system_.get(), src,
-                  target),
-        initial_delay_microseconds_);
+        [this, &src, &target]() {
+          return base_file_system_->RenameFile(src, target);
+        },
+        retry_config_);
   }
 
   Status IsDirectory(const string& dirname) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&FileSystem::IsDirectory, base_file_system_.get(), dirname),
-        initial_delay_microseconds_);
+        [this, &dirname]() { return base_file_system_->IsDirectory(dirname); },
+        retry_config_);
   }
 
   Status DeleteRecursively(const string& dirname, int64* undeleted_files,
                            int64* undeleted_dirs) override {
     return RetryingUtils::DeleteWithRetries(
-        std::bind(&FileSystem::DeleteRecursively, base_file_system_.get(),
-                  dirname, undeleted_files, undeleted_dirs),
-        initial_delay_microseconds_);
+        [this, &dirname, undeleted_files, undeleted_dirs]() {
+          return base_file_system_->DeleteRecursively(dirname, undeleted_files,
+                                                      undeleted_dirs);
+        },
+        retry_config_);
   }
 
   void FlushCaches() override { base_file_system_->FlushCaches(); }
@@ -131,7 +137,7 @@ class RetryingFileSystem : public FileSystem {
 
  private:
   std::unique_ptr<Underlying> base_file_system_;
-  const int64 initial_delay_microseconds_;
+  const RetryConfig retry_config_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(RetryingFileSystem);
 };
@@ -141,59 +147,66 @@ namespace retrying_internals {
 class RetryingRandomAccessFile : public RandomAccessFile {
  public:
   RetryingRandomAccessFile(std::unique_ptr<RandomAccessFile> base_file,
-                           int64 delay_microseconds)
-      : base_file_(std::move(base_file)),
-        initial_delay_microseconds_(delay_microseconds) {}
+                           const RetryConfig& retry_config)
+      : base_file_(std::move(base_file)), retry_config_(retry_config) {}
+
+  Status Name(StringPiece* result) const override {
+    return base_file_->Name(result);
+  }
 
   Status Read(uint64 offset, size_t n, StringPiece* result,
               char* scratch) const override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&RandomAccessFile::Read, base_file_.get(), offset, n, result,
-                  scratch),
-        initial_delay_microseconds_);
+        [this, offset, n, result, scratch]() {
+          return base_file_->Read(offset, n, result, scratch);
+        },
+        retry_config_);
   }
 
  private:
   std::unique_ptr<RandomAccessFile> base_file_;
-  const int64 initial_delay_microseconds_;
+  const RetryConfig retry_config_;
 };
 
 class RetryingWritableFile : public WritableFile {
  public:
   RetryingWritableFile(std::unique_ptr<WritableFile> base_file,
-                       int64 delay_microseconds)
-      : base_file_(std::move(base_file)),
-        initial_delay_microseconds_(delay_microseconds) {}
+                       const RetryConfig& retry_config)
+      : base_file_(std::move(base_file)), retry_config_(retry_config) {}
 
   ~RetryingWritableFile() override {
     // Makes sure the retrying version of Close() is called in the destructor.
     Close().IgnoreError();
   }
 
-  Status Append(const StringPiece& data) override {
+  Status Append(StringPiece data) override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&WritableFile::Append, base_file_.get(), data),
-        initial_delay_microseconds_);
+        [this, &data]() { return base_file_->Append(data); }, retry_config_);
   }
   Status Close() override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&WritableFile::Close, base_file_.get()),
-        initial_delay_microseconds_);
+        [this]() { return base_file_->Close(); }, retry_config_);
   }
   Status Flush() override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&WritableFile::Flush, base_file_.get()),
-        initial_delay_microseconds_);
+        [this]() { return base_file_->Flush(); }, retry_config_);
+  }
+  Status Name(StringPiece* result) const override {
+    return base_file_->Name(result);
   }
   Status Sync() override {
     return RetryingUtils::CallWithRetries(
-        std::bind(&WritableFile::Sync, base_file_.get()),
-        initial_delay_microseconds_);
+        [this]() { return base_file_->Sync(); }, retry_config_);
+  }
+  Status Tell(int64* position) override {
+    return RetryingUtils::CallWithRetries(
+        [this, &position]() { return base_file_->Tell(position); },
+        retry_config_);
   }
 
  private:
   std::unique_ptr<WritableFile> base_file_;
-  const int64 initial_delay_microseconds_;
+  const RetryConfig retry_config_;
 };
 
 }  // namespace retrying_internals
@@ -203,11 +216,12 @@ Status RetryingFileSystem<Underlying>::NewRandomAccessFile(
     const string& filename, std::unique_ptr<RandomAccessFile>* result) {
   std::unique_ptr<RandomAccessFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
-      std::bind(&FileSystem::NewRandomAccessFile, base_file_system_.get(),
-                filename, &base_file),
-      initial_delay_microseconds_));
+      [this, &filename, &base_file]() {
+        return base_file_system_->NewRandomAccessFile(filename, &base_file);
+      },
+      retry_config_));
   result->reset(new retrying_internals::RetryingRandomAccessFile(
-      std::move(base_file), initial_delay_microseconds_));
+      std::move(base_file), retry_config_));
   return Status::OK();
 }
 
@@ -216,11 +230,12 @@ Status RetryingFileSystem<Underlying>::NewWritableFile(
     const string& filename, std::unique_ptr<WritableFile>* result) {
   std::unique_ptr<WritableFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
-      std::bind(&FileSystem::NewWritableFile, base_file_system_.get(), filename,
-                &base_file),
-      initial_delay_microseconds_));
+      [this, &filename, &base_file]() {
+        return base_file_system_->NewWritableFile(filename, &base_file);
+      },
+      retry_config_));
   result->reset(new retrying_internals::RetryingWritableFile(
-      std::move(base_file), initial_delay_microseconds_));
+      std::move(base_file), retry_config_));
   return Status::OK();
 }
 
@@ -229,11 +244,12 @@ Status RetryingFileSystem<Underlying>::NewAppendableFile(
     const string& filename, std::unique_ptr<WritableFile>* result) {
   std::unique_ptr<WritableFile> base_file;
   TF_RETURN_IF_ERROR(RetryingUtils::CallWithRetries(
-      std::bind(&FileSystem::NewAppendableFile, base_file_system_.get(),
-                filename, &base_file),
-      initial_delay_microseconds_));
+      [this, &filename, &base_file]() {
+        return base_file_system_->NewAppendableFile(filename, &base_file);
+      },
+      retry_config_));
   result->reset(new retrying_internals::RetryingWritableFile(
-      std::move(base_file), initial_delay_microseconds_));
+      std::move(base_file), retry_config_));
   return Status::OK();
 }
 
@@ -241,11 +257,13 @@ template <typename Underlying>
 Status RetryingFileSystem<Underlying>::NewReadOnlyMemoryRegionFromFile(
     const string& filename, std::unique_ptr<ReadOnlyMemoryRegion>* result) {
   return RetryingUtils::CallWithRetries(
-      std::bind(&FileSystem::NewReadOnlyMemoryRegionFromFile,
-                base_file_system_.get(), filename, result),
-      initial_delay_microseconds_);
+      [this, &filename, result]() {
+        return base_file_system_->NewReadOnlyMemoryRegionFromFile(filename,
+                                                                  result);
+      },
+      retry_config_);
 }
 
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_CORE_PLATFORM_RETRYING_FILE_SYSTEM_H_
+#endif  // TENSORFLOW_CORE_PLATFORM_CLOUD_RETRYING_FILE_SYSTEM_H_

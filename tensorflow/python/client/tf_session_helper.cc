@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/util/equal_graph_def.h"
+#include "tensorflow/python/client/session_ref.h"
 #include "tensorflow/python/lib/core/ndarray_tensor.h"
 #include "tensorflow/python/lib/core/ndarray_tensor_bridge.h"
 #include "tensorflow/python/lib/core/safe_ptr.h"
@@ -41,6 +42,19 @@ namespace {
 static const char* kFeedDictErrorMsg =
     "feed_dict must be a dictionary mapping strings to NumPy arrays.";
 }  // end namespace
+
+TF_Session* TF_NewSessionRef(TF_Graph* graph, const TF_SessionOptions* opts,
+                             TF_Status* status) {
+  TF_Session* tf_session = TF_NewSession(graph, opts, status);
+  if (tf_session == nullptr) {
+    return nullptr;
+  }
+
+  Session* session = reinterpret_cast<Session*>(tf_session->session);
+  SessionRef* session_ref = new SessionRef(session);
+  tf_session->session = session_ref;
+  return tf_session;
+}
 
 void TF_Run_wrapper_helper(TF_DeprecatedSession* session, const char* handle,
                            const TF_Buffer* run_options, PyObject* feed_dict,
@@ -576,7 +590,9 @@ TF_Function* TF_GraphToFunction_wrapper(
     const TF_Graph* fn_body, const char* fn_name, bool append_hash_to_fn_name,
     const std::vector<TF_Operation*>* opers,
     const std::vector<TF_Output>& inputs, const std::vector<TF_Output>& outputs,
-    const NameVector& output_names, const TF_FunctionOptions* opts,
+    const NameVector& output_names,
+    const std::vector<TF_Operation*>* control_outputs,
+    const NameVector& control_output_names, const TF_FunctionOptions* opts,
     const char* description, TF_Status* out_status) {
   if (!output_names.empty() && output_names.size() != outputs.size()) {
     Set_TF_Status_from_Status(
@@ -599,10 +615,18 @@ TF_Function* TF_GraphToFunction_wrapper(
       output_names.empty() ? nullptr
                            : const_cast<const char**>(output_names.data());
 
-  return TF_GraphToFunction(fn_body, fn_name, append_hash_to_fn_name, nopers,
-                            opers_array, inputs.size(), inputs.data(),
-                            outputs.size(), outputs.data(), output_names_ptr,
-                            opts, description, out_status);
+  const char** control_output_names_ptr =
+      control_output_names.empty()
+          ? nullptr
+          : const_cast<const char**>(control_output_names.data());
+
+  return TF_GraphToFunctionWithControlOutputs(
+      fn_body, fn_name, append_hash_to_fn_name, nopers, opers_array,
+      inputs.size(), inputs.data(), outputs.size(), outputs.data(),
+      output_names_ptr,
+      control_outputs == nullptr ? 0 : control_outputs->size(),
+      control_outputs == nullptr ? nullptr : control_outputs->data(),
+      control_output_names_ptr, opts, description, out_status);
 }
 
 void TF_GraphSetOutputHandleShapesAndTypes_wrapper(

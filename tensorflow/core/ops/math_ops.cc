@@ -39,7 +39,61 @@ REGISTER_OP("AddN")
                                         " with other shapes.");
       }
       c->set_output(0, cur);
-      return Status::OK();
+
+      DataType dtype;
+      TF_RETURN_IF_ERROR(c->GetAttr("T", &dtype));
+
+      if (dtype != DT_VARIANT) {
+        // Exit early if not DT_VARIANT.
+        return Status::OK();
+      } else {
+        // DT_VARIANT shape handle shape inference.  All sizes and dtypes must
+        // be the same; all shapes must be compatible via Merge.
+        std::vector<shape_inference::ShapeAndType> cur_shapes_and_types;
+        auto* shapes_and_types =
+            c->input_handle_shapes_and_types(c->num_inputs() - 1);
+        if (shapes_and_types) {
+          cur_shapes_and_types = *shapes_and_types;
+        }
+
+        for (int i = c->num_inputs() - 2; i >= 0; --i) {
+          auto shapes_and_types_i = c->input_handle_shapes_and_types(i);
+          if (!shapes_and_types && shapes_and_types_i) {
+            // TODO(ebrevdo): Find cases where this happens and fix their shape
+            // inference.  If we are calling AddN on variant types, they should
+            // all have consistent shape_and_type info.
+            shapes_and_types = shapes_and_types_i;
+          } else if (shapes_and_types && shapes_and_types_i) {
+            if (shapes_and_types_i->size() != shapes_and_types->size()) {
+              return errors::InvalidArgument(
+                  "shapes_and_types[", i,
+                  "].size() == ", shapes_and_types_i->size(),
+                  " != shapes_and_types[0].size() == ",
+                  shapes_and_types->size());
+            }
+            for (int j = 0; j < shapes_and_types->size(); ++j) {
+              if (shapes_and_types->at(j).dtype !=
+                  shapes_and_types_i->at(j).dtype) {
+                return errors::InvalidArgument(
+                    "shapes_and_types[", i, "][", j, "].dtype() == ",
+                    DataTypeString(shapes_and_types_i->at(j).dtype),
+                    " != shapes_and_types[0][", j, "].dtype == ",
+                    DataTypeString(shapes_and_types->at(j).dtype));
+              }
+              TF_RETURN_WITH_CONTEXT_IF_ERROR(
+                  c->Merge(shapes_and_types_i->at(j).shape,
+                           cur_shapes_and_types.at(j).shape,
+                           &cur_shapes_and_types.at(j).shape),
+                  "From merging shapes_and_types[", i, "][", j, "].shape with ",
+                  "shapes_and_types[0][", j, "].shape");
+            }
+          }
+        }
+        if (shapes_and_types) {
+          c->set_output_handle_shapes_and_types(0, cur_shapes_and_types);
+        }
+        return Status::OK();
+      }
     });
 
 // --------------------------------------------------------------------------
@@ -65,7 +119,9 @@ REGISTER_OP("BatchMatMul")
     .Input("x: T")
     .Input("y: T")
     .Output("output: T")
-    .Attr("T: {bfloat16, half, float, double, int32, complex64, complex128}")
+    .Attr(
+        "T: {bfloat16, half, float, double, int32, int64, complex64, "
+        "complex128}")
     .Attr("adj_x: bool = false")
     .Attr("adj_y: bool = false")
     .SetShapeFn([](InferenceContext* c) {
@@ -114,6 +170,7 @@ REGISTER_OP("Cast")
     .Output("y: DstT")
     .Attr("SrcT: type")
     .Attr("DstT: type")
+    .Attr("Truncate: bool = false")
     .SetShapeFn(shape_inference::UnchangedShape);
 
 REGISTER_OP("_HostCast")
@@ -121,6 +178,7 @@ REGISTER_OP("_HostCast")
     .Output("y: DstT")
     .Attr("SrcT: type")
     .Attr("DstT: type")
+    .Attr("Truncate: bool = false")
     .SetShapeFn(shape_inference::UnchangedShape)
     .Doc(R"doc(
 Cast x of type SrcT to y of DstT.
@@ -239,6 +297,21 @@ REGISTER_OP("Acos").UNARY();
 
 REGISTER_OP("Atan").UNARY();
 
+REGISTER_OP("BesselI0e").UNARY_REAL();
+
+REGISTER_OP("BesselI1e").UNARY_REAL();
+
+REGISTER_OP("_UnaryOpsComposition")
+    .Input("x: T")
+    .Output("y: T")
+    .Attr("T: {float, half, double}")
+    .Attr("op_names: list(string)")
+    .SetShapeFn(shape_inference::UnchangedShape)
+    .Doc(R"doc(
+*NOTE*: Do not invoke this operator directly in Python. Graph rewrite pass is
+expected to create these operators.
+)doc");
+
 #undef UNARY
 #undef UNARY_REAL
 #undef UNARY_COMPLEX
@@ -333,10 +406,10 @@ REGISTER_OP("_MklAdd")
         "complex128, string}")
     .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn)
     .Doc(R"doc(
-Returns x + y element-wise.
+Returns `x` + `y` element-wise.
 
-*NOTE*: `Add` supports broadcasting. `AddN` does not. More about broadcasting
-[here](http://docs.scipy.org/doc/numpy/user/basics.broadcasting.html)
+*NOTE*: `tf.math.add` supports broadcasting. `tf.math.add_n` does not. More about broadcasting
+[here](http://docs.scipy.org/doc/numpy/user/basics.broadcasting.html).
 )doc");
 
 REGISTER_OP("Sub").BINARY_MORE().SetShapeFn(
@@ -358,6 +431,14 @@ Returns x - y element-wise.
 REGISTER_OP("Mul").BINARY_MORE().SetIsCommutative().SetShapeFn(
     shape_inference::BroadcastBinaryOpShapeFn);
 
+REGISTER_OP("MulNoNan")
+    .Input("x: T")
+    .Input("y: T")
+    .Output("z: T")
+    .Attr("T: {float, double}")
+    .SetIsCommutative()
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
+
 REGISTER_OP("_MklMul")
     .BINARY_MORE()
     .Input("mkl_x: uint8")
@@ -374,6 +455,13 @@ Returns x * y element-wise.
 
 REGISTER_OP("Div").BINARY_MORE().SetShapeFn(
     shape_inference::BroadcastBinaryOpShapeFn);
+
+REGISTER_OP("DivNoNan")
+    .Input("x: T")
+    .Input("y: T")
+    .Output("z: T")
+    .Attr("T: {float, double}")
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
 
 REGISTER_OP("FloorDiv")
     .BINARY_MORE()
@@ -404,6 +492,20 @@ Returns (x - y)(x - y) element-wise.
 *NOTE*: `SquaredDifference` supports broadcasting. More about broadcasting
 [here](http://docs.scipy.org/doc/numpy/user/basics.broadcasting.html)
 )doc");
+
+REGISTER_OP("Xlogy")
+    .Input("x: T")
+    .Input("y: T")
+    .Output("z: T")
+    .Attr("T: {half, float, double, complex64, complex128}")
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
+
+REGISTER_OP("Xdivy")
+    .Input("x: T")
+    .Input("y: T")
+    .Output("z: T")
+    .Attr("T: {half, float, double, complex64, complex128}")
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
 
 #undef BINARY_FEWER
 #undef BINARY_MORE
@@ -479,6 +581,13 @@ REGISTER_OP("Igammac")
     .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
 
 REGISTER_OP("Igamma")
+    .Input("a: T")
+    .Input("x: T")
+    .Output("z: T")
+    .Attr("T: {float, double}")
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
+
+REGISTER_OP("IgammaGradA")
     .Input("a: T")
     .Input("x: T")
     .Output("z: T")
@@ -592,7 +701,13 @@ REGISTER_OP("ApproximateEqual")
     .SetIsCommutative()
     .Attr("T: numbertype")
     .Attr("tolerance: float = 0.00001")
-    .SetShapeFn(shape_inference::UnchangedShape);
+    .SetShapeFn([](InferenceContext* c) {
+      // The inputs 'x' and 'y' must have the same shape.
+      ShapeHandle data_x = c->input(0);
+      ShapeHandle data_y = c->input(1);
+      TF_RETURN_IF_ERROR(c->Merge(data_x, data_y, &data_x));
+      return shape_inference::UnchangedShape(c);
+    });
 
 // --------------------------------------------------------------------------
 
@@ -713,7 +828,9 @@ REGISTER_OP("MatMul")
     .Output("product: T")
     .Attr("transpose_a: bool = false")
     .Attr("transpose_b: bool = false")
-    .Attr("T: {bfloat16, half, float, double, int32, complex64, complex128}")
+    .Attr(
+        "T: {bfloat16, half, float, double, int32, int64, complex64, "
+        "complex128}")
     .SetShapeFn(shape_inference::MatMulShape);
 
 REGISTER_OP("SparseMatMul")
@@ -733,6 +850,15 @@ REGISTER_OP("SparseMatMul")
 // For operations where the output is a reduction function along some
 // dimensions of the input.
 REGISTER_OP("Sum")
+    .Input("input: T")
+    .Input("reduction_indices: Tidx")
+    .Output("output: T")
+    .Attr("keep_dims: bool = false")
+    .Attr("T: numbertype")
+    .Attr("Tidx: {int32, int64} = DT_INT32")
+    .SetShapeFn(shape_inference::ReductionShape);
+
+REGISTER_OP("EuclideanNorm")
     .Input("input: T")
     .Input("reduction_indices: Tidx")
     .Output("output: T")
@@ -1017,7 +1143,7 @@ REGISTER_OP("SegmentMean")
     .Input("data: T")
     .Input("segment_ids: Tindices")
     .Output("output: T")
-    .Attr("T: realnumbertype")
+    .Attr("T: numbertype")
     .Attr("Tindices: {int32,int64}")
     .SetShapeFn(SegmentReductionShapeFn);
 
@@ -1080,7 +1206,7 @@ REGISTER_OP("UnsortedSegmentProd")
     .Input("segment_ids: Tindices")
     .Input("num_segments: Tnumsegments")
     .Output("output: T")
-    .Attr("T: realnumbertype")
+    .Attr("T: numbertype")
     .Attr("Tindices: {int32,int64}")
     .Attr("Tnumsegments: {int32,int64} = DT_INT32")
     .SetShapeFn(UnsortedSegmentReductionShapeFn);
@@ -1313,7 +1439,14 @@ REGISTER_OP("Conj")
     .Input("input: T")
     .Output("output: T")
     .Attr("T: {complex64, complex128, variant} = DT_COMPLEX64")
-    .SetShapeFn(shape_inference::UnchangedShape);
+    .SetShapeFn([](InferenceContext* c) {
+      c->set_output(0, c->input(0));
+      auto* handle_data = c->input_handle_shapes_and_types(0);
+      if (handle_data != nullptr) {
+        c->set_output_handle_shapes_and_types(0, *handle_data);
+      }
+      return Status::OK();
+    });
 
 // --------------------------------------------------------------------------
 
@@ -1352,10 +1485,26 @@ REGISTER_OP("HistogramFixedWidth")
     .Attr("T: {int32, int64, float32, float64}")
     .Attr("dtype: {int32, int64} = DT_INT32")
     .SetShapeFn([](InferenceContext* c) {
+      // value_range should be a vector.
+      ShapeHandle value_range_shape;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &value_range_shape));
+      // value_range should have two elements.
+      DimensionHandle unused;
+      TF_RETURN_IF_ERROR(
+          c->WithValue(c->Dim(value_range_shape, 0), 2, &unused));
+      // nbins should be a scalar.
+      ShapeHandle nbins_shape;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &nbins_shape));
+
+      // If nbins is available, set the shape from nbins.
       const Tensor* nbins_input = c->input_tensor(2);
       if (nbins_input != nullptr) {
         int64 nbins;
         TF_RETURN_IF_ERROR(c->GetScalarFromTensor(nbins_input, &nbins));
+        // nbins has to be positive.
+        if (nbins <= 0) {
+          return errors::InvalidArgument("Requires nbins > 0: ", nbins);
+        }
         c->set_output(0, c->Vector(nbins));
       } else {
         c->set_output(0, c->UnknownShapeOfRank(1));
@@ -1370,7 +1519,24 @@ REGISTER_OP("Bincount")
     .Attr("T: {int32, int64, float32, float64}")
     .Output("bins: T")
     .SetShapeFn([](InferenceContext* c) {
-      c->set_output(0, c->UnknownShapeOfRank(1));
+      ShapeHandle unused;
+      // The input `size` must be a scalar.
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 0, &unused));
+
+      const Tensor* size_tensor = c->input_tensor(1);
+      if (size_tensor == nullptr) {
+        // Return unknown shape if size is not known.
+        c->set_output(0, c->UnknownShapeOfRank(1));
+        return Status::OK();
+      }
+
+      // Return `[size]` shape if size is known.
+      int32 size_val = size_tensor->scalar<int32>()();
+      if (size_val < 0) {
+        return errors::InvalidArgument("size (", size_val,
+                                       ") must be non-negative");
+      }
+      c->set_output(0, c->MakeShape({size_val}));
       return Status::OK();
     });
 
@@ -1460,6 +1626,13 @@ REGISTER_OP("QuantizedAdd")
     .SetIsCommutative()
     .SetShapeFn([](InferenceContext* c) {
       TF_RETURN_IF_ERROR(shape_inference::BroadcastBinaryOpShapeFn(c));
+      // min_x, max_x, min_y, max_y should be scalar.
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 0, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(5), 0, &unused));
+
       c->set_output(1, c->Scalar());
       c->set_output(2, c->Scalar());
       return Status::OK();
@@ -1592,5 +1765,51 @@ inputs: Must all be the same size and shape.
 )doc");
 
 #endif  // INTEL_MKL
+
+REGISTER_OP("RequantizePerChannel")
+    .Input("input: T")
+    .Input("input_min: float")
+    .Input("input_max: float")
+    .Input("requested_output_min: float")
+    .Input("requested_output_max: float")
+    .Output("output: out_type")
+    .Output("output_min: float")
+    .Output("output_max: float")
+    .Attr("T: quantizedtype = DT_QINT32")
+    .Attr("out_type: quantizedtype = DT_QUINT8")
+    .SetShapeFn([](InferenceContext* c) {
+      TF_RETURN_IF_ERROR(shape_inference::UnchangedShape(c));
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 1, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 0, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 0, &unused));
+      c->set_output(1, c->Scalar());
+      c->set_output(2, c->Scalar());
+      return Status::OK();
+    });
+REGISTER_OP("RequantizationRangePerChannel")
+    .Input("input: T")
+    .Input("input_min: float")
+    .Input("input_max: float")
+    .Output("output_min: float")
+    .Output("output_max: float")
+    .Attr("T: quantizedtype = DT_QINT32")
+    .Attr("clip_value_max: float")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(1), 1, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 1, &unused));
+      c->set_output(0, c->Scalar());
+      c->set_output(1, c->Scalar());
+      return Status::OK();
+    });
+
+REGISTER_OP("NextAfter")
+    .Attr("T: {float64, float32} = DT_FLOAT")
+    .Input("x1: T")
+    .Input("x2: T")
+    .Output("output: T")
+    .SetShapeFn(shape_inference::BroadcastBinaryOpShapeFn);
 
 }  // namespace tensorflow

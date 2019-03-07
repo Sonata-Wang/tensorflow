@@ -53,6 +53,7 @@ bool XlaInterpreterExecutor::Memcpy(Stream *stream, void *host_dst,
   AsExecutorStream(stream)->EnqueueTask([this, host_dst, dev_src, size]() {
     port::Status ok = SynchronousMemcpy(host_dst, dev_src, size);
   });
+  AsExecutorStream(stream)->BlockUntilDone();
   return true;
 }
 
@@ -61,6 +62,7 @@ bool XlaInterpreterExecutor::Memcpy(Stream *stream, DeviceMemoryBase *dev_dst,
   AsExecutorStream(stream)->EnqueueTask([this, dev_dst, host_src, size]() {
     port::Status ok = SynchronousMemcpy(dev_dst, host_src, size);
   });
+  AsExecutorStream(stream)->BlockUntilDone();
   return true;
 }
 
@@ -76,9 +78,14 @@ port::Status XlaInterpreterExecutor::SynchronousMemcpy(
   return port::Status::OK();
 }
 
-bool XlaInterpreterExecutor::HostCallback(Stream *stream,
-                                          std::function<void()> callback) {
-  AsExecutorStream(stream)->EnqueueTask(callback);
+bool XlaInterpreterExecutor::HostCallback(
+    Stream *stream, std::function<port::Status()> callback) {
+  AsExecutorStream(stream)->EnqueueTask([callback]() {
+    port::Status s = callback();
+    if (!s.ok()) {
+      LOG(WARNING) << "Host callback failed: " << s;
+    }
+  });
   return true;
 }
 

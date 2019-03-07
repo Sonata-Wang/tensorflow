@@ -153,7 +153,7 @@ Status GraphToFunctionDef(const Graph& graph, const string& name,
       const string normalized = node_names.Normalize(node->name());
       argdef->set_name(normalized);
       Edge const* edge;
-      TF_CHECK_OK(node->input_edge(0, &edge));
+      TF_RETURN_IF_ERROR(node->input_edge(0, &edge));
       return_values[normalized] =
           strings::StrCat(edge->src()->name(), ":", edge->src_output());
       continue;
@@ -165,6 +165,7 @@ Status GraphToFunctionDef(const Graph& graph, const string& name,
       node_def->set_device(node->assigned_device_name());
     }
     node_def->set_name(node_names.Uniquify(node->name()));
+    MergeDebugInfo(NodeDebugInfo(node->def()), node_def);
 
     // Reset input names based on graph rather than the NodeDef.
     node_def->clear_input();

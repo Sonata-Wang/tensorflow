@@ -135,7 +135,12 @@ tensorflow::ImportNumpy();
 
 // Convert TF_DeviceListMemoryBytes and TF_Dim int64_t output to Python integers
 %typemap(out) int64_t {
-  $result = PyInt_FromLong($1);
+  $result = PyLong_FromLongLong($1);
+}
+
+// Convert TF_DeviceListIncarnation uint64_t output to Python integer
+%typemap(out) uint64_t {
+  $result = PyLong_FromUnsignedLongLong($1);
 }
 
 // We use TF_OperationGetControlInputs_wrapper instead of
@@ -458,7 +463,7 @@ TF_ImportGraphDefResultsMissingUnusedInputMappings_wrapper{
 }
 
 // Override default py3 behavior of attempting to encode into Unicode.
-%typemap(out) std::string tensorflow::GetResourceHandleShapeAndType {
+%typemap(out) std::string tensorflow::GetHandleShapeAndType {
   $result = PyBytes_FromStringAndSize($1.data(), $1.size());
 }
 
@@ -599,6 +604,27 @@ def TF_Reset(target, containers=None, config=None):
   }
 }
 
+// $input is a Python list of wrapped TF_Operations
+%typemap(in) (const std::vector<TF_Operation*>* control_outputs)
+    (std::vector<TF_Operation*> control_outputs) {
+  if ($input != Py_None) {
+    if (!PyList_Check($input)) {
+      SWIG_exception_fail(SWIG_TypeError, "$symname: expected list");
+    }
+    size_t size = PyList_Size($input);
+    for (int i = 0; i < size; ++i) {
+      PyObject* item = PyList_GetItem($input, i);
+      TF_Operation* oper_ptr;
+      SWIG_ConvertPtr(item, reinterpret_cast<void**>(&oper_ptr),
+                      $descriptor(TF_Operation*), 0);
+      control_outputs.push_back(oper_ptr);
+    }
+    $1 = &control_outputs;
+  } else {
+    $1 = nullptr;
+  }
+}
+
 // Typemaps for TF_GraphGetTensorShapeHelper.
 
 // Convert from C++ integer vector to Python list of ints.
@@ -610,7 +636,7 @@ def TF_Reset(target, containers=None, config=None):
   }
 
   for (size_t i = 0; i < $1.size(); ++i) {
-    PyList_SET_ITEM($result, i, PyInt_FromLong($1[i]));
+    PyList_SET_ITEM($result, i, PyLong_FromLongLong($1[i]));
   }
 }
 
@@ -673,7 +699,7 @@ def TF_Reset(target, containers=None, config=None):
   }
 
   for (size_t i = 0; i < $1.size(); ++i) {
-    PyList_SET_ITEM($result, i, PyInt_FromLong($1[i]));
+    PyList_SET_ITEM($result, i, PyLong_FromLongLong($1[i]));
   }
 }
 
@@ -772,11 +798,12 @@ def TF_Reset(target, containers=None, config=None):
   $1 = &types_local;
 }
 
+%unignore TF_NewSessionRef;
 %unignore SetRequireShapeInferenceFns;
 %unignore TF_TryEvaluateConstant_wrapper;
 %noexception TF_TryEvaluateConstant_wrapper;
 %unignore ExtendSession;
-%unignore ResourceHandleShapeAndType;
+%unignore HandleShapeAndType;
 
 %include "tensorflow/python/client/tf_session_helper.h"
 
